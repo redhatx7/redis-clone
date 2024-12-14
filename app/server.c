@@ -1,11 +1,14 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+void *connection_handler(void *socket_desc);
 
 int main() {
   // Disable output buffering for testing
@@ -50,16 +53,34 @@ int main() {
 
   printf("Waiting for a client to connect...\n");
   client_addr_len = sizeof(client_addr);
+  pthread_t thread_id;
 
-  int accepted_fd =
+  int client_fd =
       accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
+  while (client_fd) {
+    if (pthread_create(&thread_id, NULL, connection_handler,
+                       (void *)&client_fd) < 0) {
+      perror("Could not create thread");
+      return 1;
+    }
+    printf("connection handler thread created %lu\n", (unsigned long)thread_id);
+    client_fd =
+        accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
+  }
   printf("Client connected\n");
 
-  while (1) {
+  close(server_fd);
 
+  return 0;
+}
+
+void *connection_handler(void *socket_desc) {
+  int client_fd = *(int *)socket_desc;
+
+  while (1) {
     int req_size = 2048;
     char request[req_size];
-    int bytes_received = recv(accepted_fd, request, req_size, 0);
+    int bytes_received = recv(client_fd, request, req_size, 0);
 
     int bytes_to_remove = 8;
     if (bytes_received > 0) {
@@ -68,7 +89,7 @@ int main() {
       printf("Received message: `%s`\n", req);
 
       char message[7] = "+PONG\r\n";
-      int sent = send(accepted_fd, message, 7, 0);
+      int sent = send(client_fd, message, 7, 0);
       if (sent < 0) {
         fprintf(stderr, "Could not send response: %s\n", strerror(errno));
       } else {
@@ -78,11 +99,9 @@ int main() {
       printf("Client did not send any data");
       break;
     } else {
-      perror("could not read from connection");
+      perror("Could not read from connection");
     }
   }
 
-  close(server_fd);
-
-  return 0;
+  return NULL;
 }
