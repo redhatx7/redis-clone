@@ -58,8 +58,9 @@ int main() {
   int client_fd =
       accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
   while (client_fd) {
+    fprintf(stderr, "DEBUGPRINT[3]: server.c:60: client_fd=%d\n", client_fd);
     if (pthread_create(&thread_id, NULL, connection_handler,
-                       (void *)&client_fd) < 0) {
+                       (void *)(intptr_t)client_fd) < 0) {
       perror("Could not create thread");
       return 1;
     }
@@ -75,25 +76,78 @@ int main() {
 }
 
 void *connection_handler(void *socket_desc) {
-  int client_fd = *(int *)socket_desc;
+  int client_fd = (int)(intptr_t)socket_desc;
+  fprintf(stderr, "DEBUGPRINT[1]: server.c:78: client_fd=%d\n", client_fd);
 
   while (1) {
     int req_size = 2048;
     char request[req_size];
     int bytes_received = recv(client_fd, request, req_size, 0);
 
-    int bytes_to_remove = 8;
     if (bytes_received > 0) {
-      char *req = request + bytes_to_remove;
-      req[bytes_received] = '\0';
-      printf("Received message: `%s`\n", req);
+      request[bytes_received] = '\0';
+      printf("Received request: `%s`\n", request);
 
-      char message[7] = "+PONG\r\n";
-      int sent = send(client_fd, message, 7, 0);
-      if (sent < 0) {
-        fprintf(stderr, "Could not send response: %s\n", strerror(errno));
-      } else {
-        printf("bytes sent %d\n", sent);
+      int part_count = atoi(&request[1]);
+      char *parts[part_count];
+
+      printf("message has %d parts\n", part_count);
+
+      int msg_len = 0;
+      int cursor = 0;
+      int part_index = 0;
+      while (cursor < bytes_received) {
+        char ch = request[cursor];
+        cursor = cursor + 1;
+        if (ch == '$') {
+          int size_start = cursor;
+          int size_section_len = 0;
+          while (ch != '\r') {
+            size_section_len++;
+            ch = request[size_start + size_section_len];
+          }
+          char *msg_len_str = (char *)malloc(size_section_len * sizeof(char));
+          strncpy(msg_len_str, request + size_start, size_section_len);
+          msg_len = atoi(msg_len_str);
+          printf("part len: %d\n", msg_len);
+          parts[part_index] = malloc((msg_len) * sizeof(char));
+          strncpy(parts[part_index],
+                  request + size_start + size_section_len + 2, msg_len);
+          char *part = parts[part_index];
+          part[msg_len] = '\0';
+          printf("part content: %s\n", parts[part_index]);
+          part_index += 1;
+          cursor += size_section_len + 2;
+        }
+      }
+
+      for (int i = 0; i < part_count; i++) {
+        printf("%s\n", parts[i]);
+        if (strncmp(parts[i], "ECHO", 4) == 0) {
+          printf("responding to echo\n");
+          i = i + 1;
+          int argument_len = strlen(parts[i]);
+          char response[256];
+          response[0] = '\0';
+          snprintf(response, sizeof(response), "$%d\r\n%s\r\n", argument_len,
+                   parts[i]);
+          printf("responding with `%s`", response);
+          int sent = send(client_fd, response, strlen(response), 0);
+          if (sent < 0) {
+            fprintf(stderr, "Could not send response: %s\n", strerror(errno));
+          } else {
+            printf("bytes sent %d\n", sent);
+          }
+        } else {
+          printf("responding to ping\n");
+          char message[7] = "+PONG\r\n";
+          int sent = send(client_fd, message, 7, 0);
+          if (sent < 0) {
+            fprintf(stderr, "Could not send response: %s\n", strerror(errno));
+          } else {
+            printf("bytes sent %d\n", sent);
+          }
+        }
       }
     } else if (bytes_received == 0) {
       printf("Client did not send any data");
