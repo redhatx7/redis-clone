@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 void *connection_handler(void *arg);
@@ -13,9 +14,22 @@ void *connection_handler(void *arg);
 #define MAX_ENTRY_STR_SIZE 128
 #define MAX_MAP_SIZE 1000
 
+struct HashMapNode {
+  char *key;
+  char *val;
+  long long ttl;
+};
+
+struct HashMapNode *hashmap_node_init() {
+  struct HashMapNode *hNode =
+      (struct HashMapNode *)malloc(sizeof(struct HashMapNode));
+  hNode->key = (char *)malloc(MAX_ENTRY_STR_SIZE);
+  hNode->val = (char *)malloc(MAX_ENTRY_STR_SIZE);
+  return hNode;
+}
+
 struct HashMap {
-  char *keys[MAX_MAP_SIZE];
-  char *values[MAX_MAP_SIZE];
+  struct HashMapNode *nodes[MAX_MAP_SIZE];
   int size;
   int capacity;
 };
@@ -23,42 +37,39 @@ struct HashMap {
 struct HashMap *hashmap_init() {
   struct HashMap *h = (struct HashMap *)malloc(sizeof(struct HashMap));
   for (int i = 0; i < MAX_MAP_SIZE; i++) {
-    h->keys[i] = malloc(MAX_ENTRY_STR_SIZE);
-    h->values[i] = malloc(MAX_ENTRY_STR_SIZE);
+    struct HashMapNode *node = h->nodes[i] = malloc(sizeof(struct HashMapNode));
+    node->key = malloc(MAX_ENTRY_STR_SIZE);
+    node->val = malloc(MAX_ENTRY_STR_SIZE);
   }
   h->size = 0;
   h->capacity = MAX_MAP_SIZE;
   return h;
 }
 
-void hashmap_insert(struct HashMap *h, char *key, char *val) {
+void hashmap_insert(struct HashMap *h, struct HashMapNode *node) {
   int index = -1;
   for (int i = 0; i < h->size; i++) {
-    if (strcmp(h->keys[i], key) == 0) {
+    struct HashMapNode *node = h->nodes[i];
+    if (strcmp(node->key, node->key) == 0) {
       index = i;
       break;
     }
   }
   if (index != -1) {
-    strcpy(h->values[index], val);
+    h->nodes[index] = node;
   }
 
   if (h->size == h->capacity) {
     printf("hashamp capacity reached");
   }
 
-  h->keys[h->size] = (char *)malloc(MAX_ENTRY_STR_SIZE);
-  strcpy(h->keys[h->size], key);
-
-  h->values[h->size] = (char *)malloc(MAX_ENTRY_STR_SIZE);
-  strcpy(h->values[h->size], val);
-  h->size++;
+  h->nodes[h->size++] = node;
 }
 
-char *hashmap_get(struct HashMap *h, char *key) {
+struct HashMapNode *hashmap_get(struct HashMap *h, char *key) {
   int index = -1;
   for (int i = 0; i < h->size; i++) {
-    if (strcmp(h->keys[i], key) == 0) {
+    if (strcmp(h->nodes[i]->key, key) == 0) {
       index = i;
       break;
     }
@@ -66,7 +77,7 @@ char *hashmap_get(struct HashMap *h, char *key) {
   if (index == -1) {
     return NULL;
   }
-  return h->values[index];
+  return h->nodes[index];
 }
 
 struct Context {
@@ -158,6 +169,29 @@ void *send_response(int client_fd, char *msg) {
   return NULL;
 }
 
+void *send_null_response(int client_fd) {
+  char response[6];
+  response[5] = '\0';
+  snprintf(response, sizeof(response), "$%d\r\n", -1);
+  printf("responding with `%s`", response);
+  int sent = send(client_fd, response, 5, 0);
+  if (sent < 0) {
+    fprintf(stderr, "Could not send response: %s\n", strerror(errno));
+  } else {
+    printf("bytes sent %d\n", sent);
+  }
+  return NULL;
+}
+
+long long get_current_time() {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
+    return (long long)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+  } else {
+    return 0;
+  }
+}
+
 void *connection_handler(void *arg) {
   struct Context *ctx = (struct Context *)arg;
   int client_fd = ctx->conn_fd;
@@ -206,7 +240,6 @@ void *connection_handler(void *arg) {
       }
 
       for (int i = 0; i < part_count; i++) {
-        printf("%s\n", parts[i]);
         if (strncmp(parts[i], "ECHO", 4) == 0) {
           printf("responding to echo\n");
           i = i + 1;
@@ -216,17 +249,39 @@ void *connection_handler(void *arg) {
           printf("responding to set\n");
           char *key = parts[++i];
           char *val = parts[++i];
-          hashmap_insert(ctx->hashmap, key, val);
+          long long ttl = -1;
+          if (part_count > 3) {
+            if (strcmp(parts[++i], "px") != 0) {
+              perror("unknown command arguments");
+              break;
+            }
+            long long current_time = get_current_time();
+            printf("current time: %lld", current_time);
+            ttl = current_time + atoi(parts[++i]);
+          }
+          printf("ttl: %lld", ttl);
+          struct HashMapNode *hNode = hashmap_node_init();
+          strcpy(hNode->key, key);
+          strcpy(hNode->val, val);
+          hNode->ttl = ttl;
+          hashmap_insert(ctx->hashmap, hNode);
           send_response(ctx->conn_fd, "OK");
         } else if (strncmp(parts[i], "GET", 3) == 0) {
           printf("responding to get\n");
           char *key = parts[++i];
-          char *val = hashmap_get(ctx->hashmap, key);
-          // if (val == NULL) {
-          //   send_response(ctx->conn_fd, "-1");
-          //   continue;
-          // }
-          send_response(ctx->conn_fd, val);
+          struct HashMapNode *node = hashmap_get(ctx->hashmap, key);
+          if (node == NULL) {
+            send_null_response(ctx->conn_fd);
+            continue;
+          }
+          long long current_time = get_current_time();
+          printf("current time: %lld", current_time);
+          if (node->ttl < current_time && node->ttl != -1) {
+            printf("item expired ttl: %lld \n", node->ttl);
+            send_null_response(ctx->conn_fd);
+            continue;
+          }
+          send_response(ctx->conn_fd, node->val);
         } else if (strncmp(parts[i], "PING", 4) == 0) {
           printf("responding to ping\n");
           char message[7] = "+PONG\r\n";
