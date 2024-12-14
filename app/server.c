@@ -51,7 +51,17 @@ int main() {
   printf("Waiting for a client to connect...\n");
   client_addr_len = sizeof(client_addr);
 
-  accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
+  int accepted_fd =
+      accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
+
+  char message[9] = "+PONG\r\n";
+
+  int sent = send(accepted_fd, message, 7, 0);
+  if (sent < 0) {
+    fprintf(stderr, "Could not send response: %s\n", strerror(errno));
+  } else {
+    printf("bytes sent %d", sent);
+  }
   printf("Client connected\n");
 
   close(server_fd);
