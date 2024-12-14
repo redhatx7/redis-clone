@@ -8,7 +8,71 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-void *connection_handler(void *socket_desc);
+void *connection_handler(void *arg);
+
+#define MAX_ENTRY_STR_SIZE 128
+#define MAX_MAP_SIZE 1000
+
+struct HashMap {
+  char *keys[MAX_MAP_SIZE];
+  char *values[MAX_MAP_SIZE];
+  int size;
+  int capacity;
+};
+
+struct HashMap *hashmap_init() {
+  struct HashMap *h = (struct HashMap *)malloc(sizeof(struct HashMap));
+  for (int i = 0; i < MAX_MAP_SIZE; i++) {
+    h->keys[i] = malloc(MAX_ENTRY_STR_SIZE);
+    h->values[i] = malloc(MAX_ENTRY_STR_SIZE);
+  }
+  h->size = 0;
+  h->capacity = MAX_MAP_SIZE;
+  return h;
+}
+
+void hashmap_insert(struct HashMap *h, char *key, char *val) {
+  int index = -1;
+  for (int i = 0; i < h->size; i++) {
+    if (strcmp(h->keys[i], key) == 0) {
+      index = i;
+      break;
+    }
+  }
+  if (index != -1) {
+    strcpy(h->values[index], val);
+  }
+
+  if (h->size == h->capacity) {
+    printf("hashamp capacity reached");
+  }
+
+  h->keys[h->size] = (char *)malloc(MAX_ENTRY_STR_SIZE);
+  strcpy(h->keys[h->size], key);
+
+  h->values[h->size] = (char *)malloc(MAX_ENTRY_STR_SIZE);
+  strcpy(h->values[h->size], val);
+  h->size++;
+}
+
+char *hashmap_get(struct HashMap *h, char *key) {
+  int index = -1;
+  for (int i = 0; i < h->size; i++) {
+    if (strcmp(h->keys[i], key) == 0) {
+      index = i;
+      break;
+    }
+  }
+  if (index == -1) {
+    return NULL;
+  }
+  return h->values[index];
+}
+
+struct Context {
+  int conn_fd;
+  struct HashMap *hashmap;
+};
 
 int main() {
   // Disable output buffering for testing
@@ -51,6 +115,8 @@ int main() {
     return 1;
   }
 
+  struct HashMap *hashmap = hashmap_init();
+
   printf("Waiting for a client to connect...\n");
   client_addr_len = sizeof(client_addr);
   pthread_t thread_id;
@@ -58,9 +124,12 @@ int main() {
   int client_fd =
       accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
   while (client_fd) {
+    struct Context *context = malloc(sizeof(struct Context));
+    context->conn_fd = client_fd;
+    context->hashmap = hashmap;
     fprintf(stderr, "DEBUGPRINT[3]: server.c:60: client_fd=%d\n", client_fd);
-    if (pthread_create(&thread_id, NULL, connection_handler,
-                       (void *)(intptr_t)client_fd) < 0) {
+    if (pthread_create(&thread_id, NULL, connection_handler, (void *)context) <
+        0) {
       perror("Could not create thread");
       return 1;
     }
@@ -75,8 +144,23 @@ int main() {
   return 0;
 }
 
-void *connection_handler(void *socket_desc) {
-  int client_fd = (int)(intptr_t)socket_desc;
+void *send_response(int client_fd, char *msg) {
+  char response[256];
+  response[0] = '\0';
+  snprintf(response, sizeof(response), "$%d\r\n%s\r\n", (int)strlen(msg), msg);
+  printf("responding with `%s`", response);
+  int sent = send(client_fd, response, strlen(response), 0);
+  if (sent < 0) {
+    fprintf(stderr, "Could not send response: %s\n", strerror(errno));
+  } else {
+    printf("bytes sent %d\n", sent);
+  }
+  return NULL;
+}
+
+void *connection_handler(void *arg) {
+  struct Context *ctx = (struct Context *)arg;
+  int client_fd = ctx->conn_fd;
   fprintf(stderr, "DEBUGPRINT[1]: server.c:78: client_fd=%d\n", client_fd);
 
   while (1) {
@@ -127,18 +211,23 @@ void *connection_handler(void *socket_desc) {
           printf("responding to echo\n");
           i = i + 1;
           int argument_len = strlen(parts[i]);
-          char response[256];
-          response[0] = '\0';
-          snprintf(response, sizeof(response), "$%d\r\n%s\r\n", argument_len,
-                   parts[i]);
-          printf("responding with `%s`", response);
-          int sent = send(client_fd, response, strlen(response), 0);
-          if (sent < 0) {
-            fprintf(stderr, "Could not send response: %s\n", strerror(errno));
-          } else {
-            printf("bytes sent %d\n", sent);
-          }
-        } else {
+          send_response(ctx->conn_fd, parts[i]);
+        } else if (strncmp(parts[i], "SET", 3) == 0) {
+          printf("responding to set\n");
+          char *key = parts[++i];
+          char *val = parts[++i];
+          hashmap_insert(ctx->hashmap, key, val);
+          send_response(ctx->conn_fd, "OK");
+        } else if (strncmp(parts[i], "GET", 3) == 0) {
+          printf("responding to get\n");
+          char *key = parts[++i];
+          char *val = hashmap_get(ctx->hashmap, key);
+          // if (val == NULL) {
+          //   send_response(ctx->conn_fd, "-1");
+          //   continue;
+          // }
+          send_response(ctx->conn_fd, val);
+        } else if (strncmp(parts[i], "PING", 4) == 0) {
           printf("responding to ping\n");
           char message[7] = "+PONG\r\n";
           int sent = send(client_fd, message, 7, 0);
@@ -147,6 +236,9 @@ void *connection_handler(void *socket_desc) {
           } else {
             printf("bytes sent %d\n", sent);
           }
+        } else {
+          perror("Unknown command\n");
+          break;
         }
       }
     } else if (bytes_received == 0) {
