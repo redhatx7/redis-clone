@@ -53,16 +53,34 @@ int main() {
 
   int accepted_fd =
       accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
-
-  char message[9] = "+PONG\r\n";
-
-  int sent = send(accepted_fd, message, 7, 0);
-  if (sent < 0) {
-    fprintf(stderr, "Could not send response: %s\n", strerror(errno));
-  } else {
-    printf("bytes sent %d", sent);
-  }
   printf("Client connected\n");
+
+  while (1) {
+
+    int req_size = 2048;
+    char request[req_size];
+    int bytes_received = recv(accepted_fd, request, req_size, 0);
+
+    int bytes_to_remove = 8;
+    if (bytes_received > 0) {
+      char *req = request + bytes_to_remove;
+      req[bytes_received] = '\0';
+      printf("Received message: `%s`\n", req);
+
+      char message[7] = "+PONG\r\n";
+      int sent = send(accepted_fd, message, 7, 0);
+      if (sent < 0) {
+        fprintf(stderr, "Could not send response: %s\n", strerror(errno));
+      } else {
+        printf("bytes sent %d\n", sent);
+      }
+    } else if (bytes_received == 0) {
+      printf("Client did not send any data");
+      break;
+    } else {
+      perror("could not read from connection");
+    }
+  }
 
   close(server_fd);
 
