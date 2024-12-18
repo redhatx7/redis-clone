@@ -110,7 +110,6 @@ struct ParseResult parse_response( const char *buffer, size_t length){
     struct Parser parser = {
         .buffer = buffer,
         .current_index = 0,
-        .state = INITIAL_STATE
     };
     struct ParseResult parse_result = {
         .command = UNKNOWN,
